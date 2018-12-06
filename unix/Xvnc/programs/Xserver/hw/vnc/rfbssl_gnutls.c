@@ -34,6 +34,9 @@
 static char errStr[BUFSIZE] = "No error";
 
 struct rfbssl_ctx {
+  char peekbuf[2048];
+  int peeklen;
+  int peekstart;
   gnutls_session_t session;
   gnutls_anon_server_credentials_t anon_cred;
   gnutls_certificate_credentials_t x509_cred;
@@ -202,6 +205,25 @@ int rfbssl_accept(rfbClientPtr cl)
 }
 
 
+static int rfbssl_do_read(rfbClientPtr cl, char *buf, int bufsize)
+{
+  struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+  int ret;
+
+  while ((ret = gnutls_record_recv(ctx->session, buf, bufsize)) < 0) {
+    if (gnutls_error_is_fatal(ret))
+      break;
+  }
+  if (ret < 0) {
+    rfbssl_error("gnutls_record_recv()", ret);
+    errno = EIO;
+    return -1;
+  }
+
+  return ret;
+}
+
+
 int rfbssl_write(rfbClientPtr cl, const char *buf, int bufsize)
 {
   struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
@@ -221,22 +243,63 @@ int rfbssl_write(rfbClientPtr cl, const char *buf, int bufsize)
 }
 
 
-int rfbssl_read(rfbClientPtr cl, char *buf, int bufsize)
+static void rfbssl_gc_peekbuf(struct rfbssl_ctx *ctx, int bufsize)
 {
-  struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
-  int ret;
-
-  while ((ret = gnutls_record_recv(ctx->session, buf, bufsize)) < 0) {
-    if (gnutls_error_is_fatal(ret))
-      break;
+  if (ctx->peekstart) {
+    int spaceleft = sizeof(ctx->peekbuf) - ctx->peeklen - ctx->peekstart;
+    if (spaceleft < bufsize) {
+      memmove(ctx->peekbuf, ctx->peekbuf + ctx->peekstart, ctx->peeklen);
+      ctx->peekstart = 0;
+    }
   }
-  if (ret < 0) {
-    rfbssl_error("gnutls_record_recv()", ret);
-    errno = EIO;
-    return -1;
+}
+
+
+static int __rfbssl_read(rfbClientPtr cl, char *buf, int bufsize, int peek)
+{
+  int ret = 0;
+  struct rfbssl_ctx *ctx = (struct rfbssl_ctx *)cl->sslctx;
+
+  rfbssl_gc_peekbuf(ctx, bufsize);
+
+  if (ctx->peeklen) {
+    /* If we have any peek data, simply return that. */
+    ret = bufsize < ctx->peeklen ? bufsize : ctx->peeklen;
+    memcpy(buf, ctx->peekbuf + ctx->peekstart, ret);
+    if (!peek) {
+      ctx->peeklen -= ret;
+      if (ctx->peeklen != 0)
+        ctx->peekstart += ret;
+      else
+        ctx->peekstart = 0;
+    }
+  }
+
+  if (ret < bufsize) {
+    int n;
+    /* read the remaining data */
+    if ((n = rfbssl_do_read(cl, buf + ret, bufsize - ret)) <= 0)
+     return n;
+    if (peek) {
+      memcpy(ctx->peekbuf + ctx->peekstart + ctx->peeklen, buf + ret, n);
+      ctx->peeklen += n;
+    }
+    ret += n;
   }
 
   return ret;
+}
+
+
+int rfbssl_read(rfbClientPtr cl, char *buf, int bufsize)
+{
+  return __rfbssl_read(cl, buf, bufsize, 0);
+}
+
+
+int rfbssl_peek(rfbClientPtr cl, char *buf, int bufsize)
+{
+  return __rfbssl_read(cl, buf, bufsize, 1);
 }
 
 
