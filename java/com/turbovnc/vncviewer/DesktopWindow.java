@@ -391,6 +391,106 @@ class DesktopWindow extends JPanel implements Runnable, MouseListener,
     scaleWidthRatio = (float)scaledWidth / (float)cc.cp.width;
     scaleHeightRatio = (float)scaledHeight / (float)cc.cp.height;
   }
+    
+	// EDT
+	private long lastTime = 0;
+	private boolean corrected = false;
+
+	public void paintComponent(Graphics g) {
+		if (lastTime > 1) {
+      /* 
+      Added 4 environment variables which will enable saving the remote screen as an image repeatedly:
+        1) VNCSAVE - directory in which to save all images
+        2) VNCSAVEFORMAT - file type (PNG, JPG, ...)
+        3) VNCSAVEWAIT - how long to wait between each save in seconds (put 60 to save every minute)
+        4) VNCMOUSE - optional environment variable, in the formay X,Y (e.g.: 100,100) in case you'd like to move the mouse to a specific position on the screen in order not to mask part of the image, for example to be able to accomplish OCR successfully.
+      */
+			String vncSave = System.getenv("VNCSAVE");
+			if (!vncSave.endsWith("/"))
+				vncSave = vncSave + "/";
+			String vncFormat = System.getenv("VNCSAVEFORMAT");
+			String vncWaitStr = System.getenv("VNCSAVEWAIT");
+			String vncMouseStr = System.getenv("VNCMOUSE");
+			if ((vncSave != null) && (vncFormat != null) && (vncWaitStr != null)) {
+				int vncWait = Integer.parseInt(vncWaitStr) * 1000;
+				long thistime = System.currentTimeMillis();
+				long diff = thistime - lastTime;
+
+				// every half the vncWait time - adjust mouse position to top
+				// right
+				if ((vncMouseStr != null) && (!corrected) && (diff > vncWait / 2)) {
+					corrected = true;
+
+					// parse the wanted mouse location
+					String[] mousexy = vncMouseStr.split(",");
+					if (mousexy.length == 2) {
+						int mousex = Integer.parseInt(mousexy[0]);
+						int mousey = Integer.parseInt(mousexy[1]);
+
+						// get window location
+						java.awt.Point topleft = this.getLocationOnScreen();
+						int screenx = (int) topleft.getX();
+						int screeny = (int) topleft.getY();
+
+						Robot robot;
+						try {
+							robot = new Robot();
+							robot.mouseMove(screenx + mousex, screeny + mousey);
+						} catch (AWTException e) {
+						}
+					}
+				}
+				// every vncWait seconds save the screen
+				if (diff > vncWait) {
+					corrected = false;
+
+					DateFormat dateFormat = new SimpleDateFormat("yyyyMMddHHmmss");
+					String fileName = vncSave + dateFormat.format(new Date()) + "." + vncFormat;
+
+					savePic(im.getImage(), vncFormat, fileName);
+
+					lastTime = thistime;
+				}
+			}
+		} else {
+			lastTime++;
+		}
+
+		Graphics2D g2 = (Graphics2D) g;
+		if (!swingDB && RepaintManager.currentManager(this).isDoubleBufferingEnabled())
+			// If double buffering is enabled, then this must be a
+			// system-triggered
+			// repaint, so we need to repaint all of the parent components.
+			super.paintComponent(g);
+		if (cc.viewport != null && (cc.viewport.dx > 0 || cc.viewport.dy > 0))
+			g2.translate(cc.viewport.dx, cc.viewport.dy);
+		if (cc.cp.width != scaledWidth || cc.cp.height != scaledHeight) {
+			g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+			g2.drawImage(im.getImage(), 0, 0, scaledWidth, scaledHeight, null);
+		} else {
+			Rectangle r = g.getClipBounds();
+
+			g2.drawImage(im.getImage(), r.x, r.y, r.x + r.width, r.y + r.height, r.x, r.y, r.x + r.width,
+					r.y + r.height, null);
+		}
+		g2.dispose();
+		if (!swingDB)
+			RepaintManager.currentManager(this).setDoubleBufferingEnabled(true);
+	}
+
+  // save an image of specified type in destination filename
+	public void savePic(Image image, String type, String dst) {
+		int width = image.getWidth(this);
+		int height = image.getHeight(this);
+		BufferedImage bi = new BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR);
+		Graphics g = bi.getGraphics();
+		try {
+			g.drawImage(image, 0, 0, null);
+			ImageIO.write(bi, type, new File(dst));
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+	}
 
   // EDT
   public void paintComponent(Graphics g) {
